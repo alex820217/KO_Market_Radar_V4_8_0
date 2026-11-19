@@ -15,17 +15,13 @@ def connect():
     existing={r[1] for r in c.execute("PRAGMA table_info(trades)")}
     migrations={
       'last_price':'REAL','signal_id':'TEXT','snapshot_verified':'INTEGER DEFAULT 0',
-      'trade_source':"TEXT DEFAULT 'HISTORICAL'",
-      'trading_mode':"TEXT DEFAULT 'INTRADAY'",'planned_holding_days':'INTEGER','max_product_stop_pct':'REAL',
-      'basis_entry':'REAL','basis_stop':'REAL','basis_tp1':'REAL','basis_tp2':'REAL','product_leverage':'REAL','knockout_level':'REAL'
+      'trade_source':"TEXT DEFAULT 'HISTORICAL'"
     }
     for name,sqltype in migrations.items():
         if name not in existing:c.execute(f"ALTER TABLE trades ADD COLUMN {name} {sqltype}")
     c.execute("""CREATE TABLE IF NOT EXISTS signals(
       signal_id TEXT PRIMARY KEY,recorded_at TEXT,asset TEXT,ticker TEXT,direction TEXT,
-      signal TEXT,grade TEXT,score REAL,snapshot TEXT,trading_mode TEXT DEFAULT 'INTRADAY')""")
-    sigcols={r[1] for r in c.execute('PRAGMA table_info(signals)')}
-    if 'trading_mode' not in sigcols:c.execute("ALTER TABLE signals ADD COLUMN trading_mode TEXT DEFAULT 'INTRADAY'")
+      signal TEXT,grade TEXT,score REAL,snapshot TEXT)""")
     c.execute('CREATE INDEX IF NOT EXISTS idx_signals_ticker_time ON signals(ticker,recorded_at)')
     c.commit();return c
 
@@ -37,18 +33,18 @@ def safe(value):
     if pd.isna(value):return None
     return value
 
-def save_signal(row, recorded_at=None, trading_mode='INTRADAY'):
+def save_signal(row, recorded_at=None):
     snap={str(k):safe(v) for k,v in dict(row).items()};signal=str(snap.get('Signal',''));direction='LONG' if 'LONG' in signal else 'SHORT' if 'SHORT' in signal else None;sid=str(uuid.uuid4());c=connect()
-    c.execute('INSERT INTO signals(signal_id,recorded_at,asset,ticker,direction,signal,grade,score,snapshot,trading_mode) VALUES(?,?,?,?,?,?,?,?,?,?)',(sid,recorded_at or now_utc(),str(snap.get('Asset','')),str(snap.get('Ticker','')),direction,signal,str(snap.get('Grade','-')),float(snap.get('Score') or 0),json.dumps(snap,ensure_ascii=False,default=str),trading_mode));c.commit();c.close();return sid
+    c.execute('INSERT INTO signals VALUES(?,?,?,?,?,?,?,?,?)',(sid,recorded_at or now_utc(),str(snap.get('Asset','')),str(snap.get('Ticker','')),direction,signal,str(snap.get('Grade','-')),float(snap.get('Score') or 0),json.dumps(snap,ensure_ascii=False,default=str)));c.commit();c.close();return sid
 
-def save_scan(frame, trading_mode='INTRADAY'):
+def save_scan(frame):
     timestamp=now_utc();ids=[]
     for _,row in frame.iterrows():
         if any(k in str(row.get('Signal','')) for k in ('WATCH','PRE','EARLY','CONFIRMED')):ids.append(save_signal(row.to_dict(),timestamp))
     return ids
 
-def find_signal(ticker,trade_time,direction=None,max_minutes=20,trading_mode='INTRADAY'):
-    c=connect();params=[ticker,trade_time,trading_mode];query="SELECT * FROM signals WHERE ticker=? AND recorded_at<=? AND COALESCE(trading_mode,'INTRADAY')=?"
+def find_signal(ticker,trade_time,direction=None,max_minutes=20):
+    c=connect();params=[ticker,trade_time];query='SELECT * FROM signals WHERE ticker=? AND recorded_at<=?'
     if direction:query+=' AND direction=?';params.append(direction)
     query+=' ORDER BY recorded_at DESC LIMIT 1';row=c.execute(query,params).fetchone();c.close()
     if not row:return None
@@ -56,7 +52,7 @@ def find_signal(ticker,trade_time,direction=None,max_minutes=20,trading_mode='IN
     if age<0 or age>max_minutes:return None
     d['age_minutes']=age;d['snapshot']=json.loads(d['snapshot']);return d
 
-def create_trade(wkn,asset,ticker,direction,trade_time,entry,stop,quantity,signal=None,verified=False,source='SYSTEM_SIGNAL',notes='',trading_mode='INTRADAY',swing=None):
+def create_trade(wkn,asset,ticker,direction,trade_time,entry,stop,quantity,signal=None,verified=False,source='SYSTEM_SIGNAL',notes=''):
     tid=str(uuid.uuid4());entry=float(entry);quantity=float(quantity);signal_id=signal.get('signal_id') if signal else None
     c=connect()
     cols={r[1] for r in c.execute("PRAGMA table_info(trades)")}
@@ -65,9 +61,8 @@ def create_trade(wkn,asset,ticker,direction,trade_time,entry,stop,quantity,signa
       'entry_time':trade_time,'exit_time':None,'certificate_entry':entry,'certificate_stop':float(stop),
       'certificate_exit':None,'quantity':quantity,'investment':entry*quantity,'highest_price':entry,
       'lowest_price':entry,'exit_reason':None,'notes':notes,'last_price':entry,'signal_id':signal_id,
-      'snapshot_verified':1 if verified else 0,'trade_source':source,'trading_mode':trading_mode
+      'snapshot_verified':1 if verified else 0,'trade_source':source
     }
-    if swing: values.update({k:v for k,v in swing.items() if k in cols})
     # Legacy columns are populated too, so old journal views/backups remain usable.
     if 'signal_snapshot' in cols:
         values['signal_snapshot']=json.dumps(signal.get('snapshot',{}) if signal else {},ensure_ascii=False,default=str)
